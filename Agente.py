@@ -544,6 +544,12 @@ class MessageOrchestratorAgent:
     def _pick_human_team(self, content: str) -> str | None:
         normalized = fold_text(content)
 
+        def _support_team_name() -> str | None:
+            for original_name, folded_name in self._active_teams_folded.items():
+                if "suporte" in folded_name or "support" in folded_name:
+                    return original_name
+            return None
+
         # Se o usuário mencionou explicitamente um time ativo, prioriza ele.
         for original_name, folded_name in self._active_teams_folded.items():
             if folded_name and folded_name in normalized:
@@ -564,6 +570,9 @@ class MessageOrchestratorAgent:
                     return original_name
 
         if "equipe" in normalized or "time" in normalized or "team" in normalized or "equipo" in normalized:
+            support_team = _support_team_name()
+            if support_team:
+                return support_team
             if TEAM_DEFAULT_HUMAN in self._active_teams:
                 return TEAM_DEFAULT_HUMAN
 
@@ -573,6 +582,10 @@ class MessageOrchestratorAgent:
                     return original_name
 
         if self._active_teams:
+            # Pedido humano sem equipe explícita => padrão Suporte.
+            support_team = _support_team_name()
+            if support_team:
+                return support_team
             if TEAM_DEFAULT_HUMAN in self._active_teams:
                 return TEAM_DEFAULT_HUMAN
             return self._active_teams[0]
