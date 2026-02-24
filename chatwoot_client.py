@@ -8,11 +8,19 @@ gerenciar atributos de conversas.
 """
 
 import logging
+import unicodedata
 from typing import Any, Optional
 
 import httpx
 
 logger = logging.getLogger("chatwoot_client")
+
+
+def _fold_text(value: str) -> str:
+    lowered = " ".join((value or "").strip().lower().split())
+    return "".join(
+        c for c in unicodedata.normalize("NFD", lowered) if unicodedata.category(c) != "Mn"
+    )
 
 
 class ChatwootClient:
@@ -79,12 +87,37 @@ class ChatwootClient:
 
         try:
             teams = await self._list_teams(account_id)
+            query_folded = _fold_text(value)
+            best_match: int | None = None
             for team in teams:
                 name = str(team.get("name") or "").strip()
                 team_id = team.get("id")
-                if name and isinstance(team_id, int):
-                    self._team_cache[name.casefold()] = team_id
-            return self._team_cache.get(folded)
+
+                # Chatwoot pode retornar id como int ou str.
+                resolved_id: int | None = None
+                if isinstance(team_id, int):
+                    resolved_id = team_id
+                elif isinstance(team_id, str) and team_id.isdigit():
+                    resolved_id = int(team_id)
+
+                if not name or resolved_id is None:
+                    continue
+
+                team_name_folded = _fold_text(name)
+                self._team_cache[name.casefold()] = resolved_id
+                self._team_cache[team_name_folded] = resolved_id
+
+                if team_name_folded == query_folded:
+                    return resolved_id
+
+                # Match parcial para frases como "equipe de financeiro".
+                if query_folded in team_name_folded or team_name_folded in query_folded:
+                    best_match = best_match or resolved_id
+
+            if best_match is not None:
+                return best_match
+
+            return self._team_cache.get(folded) or self._team_cache.get(query_folded)
         except Exception as exc:
             logger.warning("Não foi possível resolver team_id para '%s': %s", value, exc)
             return None

@@ -622,6 +622,11 @@ class MessageOrchestratorAgent:
         resolved_human_team_id = await self.chatwoot.resolve_team_id(account_id, selected_human_team)
         if resolved_human_team_id is None and CHATWOOT_HUMAN_TEAM_ID:
             resolved_human_team_id = CHATWOOT_HUMAN_TEAM_ID
+        logger.info(
+            "[orchestrator] human_route team_selected=%r team_id=%r",
+            selected_human_team,
+            resolved_human_team_id,
+        )
 
         # Rota: atendimento humano.
         if decision.route == "human":
