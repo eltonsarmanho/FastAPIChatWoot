@@ -769,6 +769,21 @@ async def lifespan(app: FastAPI):  # noqa: D401
     )
     mec_specialist_agent = MecSpecialistAgent(rag_system)
     orchestrator_agent = MessageOrchestratorAgent(mec_specialist_agent, chatwoot_client)
+    # Pré-carrega cache de times para resolução correta de team_id.
+    try:
+        teams = await chatwoot_client._list_teams(CHATWOOT_ACCOUNT_ID)
+        for t in teams:
+            name = str(t.get("name") or "").strip()
+            tid = t.get("id")
+            if isinstance(tid, str) and tid.isdigit():
+                tid = int(tid)
+            if name and isinstance(tid, int):
+                from chatwoot_client import _fold_text
+                chatwoot_client._team_cache[name.casefold()] = tid
+                chatwoot_client._team_cache[_fold_text(name)] = tid
+        logger.info("[startup] Times carregados: %s", {k: v for k, v in chatwoot_client._team_cache.items()})
+    except Exception as exc:
+        logger.warning("[startup] Não foi possível pré-carregar times: %s", exc)
     # Agenda carregamento em background: servidor fica disponível IMEDIATAMENTE
     asyncio.create_task(_load_docs_background())
     logger.info("Servidor pronto! Documentos sendo carregados em background...")
@@ -940,6 +955,24 @@ async def health_check():
         "docs_folder": DOCS_FOLDER,
         "chatwoot_url": CHATWOOT_API_URL,
     }
+
+
+@app.get("/teams", summary="Listar times do Chatwoot")
+async def list_teams():
+    """Lista os times disponíveis no Chatwoot com seus IDs reais e o cache atual."""
+    try:
+        teams = await chatwoot_client._list_teams(CHATWOOT_ACCOUNT_ID)
+        return {
+            "teams": [
+                {"id": t.get("id"), "name": t.get("name"), "description": t.get("description")}
+                for t in teams
+            ],
+            "team_cache": dict(chatwoot_client._team_cache),
+            "env_TEAM": TEAM,
+            "env_TEAM_DEFAULT_HUMAN": TEAM_DEFAULT_HUMAN,
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @app.post("/reload-docs", summary="Recarregar documentos")
