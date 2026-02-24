@@ -351,7 +351,9 @@ class MessageOrchestratorAgent:
             r"\bespecialista\b",
             r"\bfinanceiro\b",
             r"\bsuporte\b",
+            r"\bsupport\b",
             r"falar com (uma )?pessoa",
+            r"quero falar com (o|a|um|uma)?\s*(suporte|financeiro|atendente|especialista|equipe|time|humano)",
             r"falar com (o|a|um|uma)?\s*(suporte|financeiro|atendente|especialista|equipe|time)",
             r"suporte humano",
             r"quero falar com .*humano",
@@ -360,6 +362,16 @@ class MessageOrchestratorAgent:
             r"me encaminh(a|e).*(suporte|financeiro|time|equipe|humano)",
             r"passar para (o|a)?\s*(suporte|financeiro|time|equipe|humano)",
         ]
+        self._human_action_keywords = {
+            "falar", "encaminhar", "passar", "transferir", "atender",
+            "talk", "speak", "transfer", "escalate",
+            "hablar", "transferir", "escalar",
+        }
+        self._human_target_keywords = {
+            "humano", "pessoa", "atendente", "especialista", "equipe", "time", "suporte", "financeiro",
+            "human", "person", "agent", "team", "support",
+            "persona", "agente", "equipo", "soporte",
+        }
         self._ai_patterns = [
             r"\bia\b",
             r"intelig[eê]ncia artificial",
@@ -407,13 +419,23 @@ class MessageOrchestratorAgent:
                 search_knowledge=False,
                 telemetry=False,
                 instructions=(
-                    "Classifique a mensagem em uma das rotas: MEC, HUMAN, DIRECT. "
-                    "Retorne somente uma palavra: MEC, HUMAN ou DIRECT."
+                    "Você é um classificador de roteamento para atendimento. "
+                    "Classifique a mensagem em uma rota: MEC, HUMAN ou DIRECT. "
+                    "Use HUMAN quando o usuário pedir pessoa/time/suporte (qualquer idioma). "
+                    "Use DIRECT para smalltalk/saudações/agradecimentos. "
+                    "Use MEC para dúvidas acadêmicas, regulatórias e de documentos. "
+                    "Retorne SOMENTE uma palavra em MAIÚSCULAS: MEC, HUMAN ou DIRECT."
                 ),
             )
 
     def _requested_human(self, text: str) -> bool:
-        return any(re.search(pattern, text) for pattern in self._human_patterns)
+        if any(re.search(pattern, text) for pattern in self._human_patterns):
+            return True
+
+        folded = fold_text(text)
+        has_action = any(keyword in folded for keyword in self._human_action_keywords)
+        has_target = any(keyword in folded for keyword in self._human_target_keywords)
+        return has_action and has_target
 
     def _requested_ai(self, text: str) -> bool:
         return any(re.search(pattern, text) for pattern in self._ai_patterns)
@@ -429,13 +451,18 @@ class MessageOrchestratorAgent:
             return None
         try:
             result = self._classifier_agent.run(text)
-            value = normalize_text(result.content or "")
-            if value == "human":
+            value_raw = (result.content or "").strip()
+            value = normalize_text(value_raw)
+
+            # Aceita respostas com pontuação/explicação curta, ex: "HUMAN." ou "Route: MEC"
+            if "human" in value:
                 return IntentDecision(route="human", reason="llm_classifier", requested_human=False)
-            if value == "direct":
+            if "direct" in value:
                 return IntentDecision(route="direct", reason="llm_classifier", requested_ai=False)
-            if value == "mec":
+            if "mec" in value:
                 return IntentDecision(route="mec", reason="llm_classifier", requested_ai=False)
+
+            logger.warning("Classificador LLM retornou valor inesperado: %r", value_raw)
         except Exception as exc:
             logger.warning(f"Falha no classificador LLM do orquestrador: {exc}")
         return None
@@ -475,6 +502,12 @@ class MessageOrchestratorAgent:
                 requested_ai=True,
             )
 
+        # Classificação dinâmica por LLM (quando habilitada).
+        # Mantemos prioridades explícitas acima (pedido humano/IA e lock humano) por segurança.
+        llm_decision = self._classify_with_llm(text)
+        if llm_decision:
+            return llm_decision
+
         if self._is_smalltalk(text):
             return IntentDecision(
                 route="direct",
@@ -490,10 +523,6 @@ class MessageOrchestratorAgent:
                 requested_human=False,
                 requested_ai=False,
             )
-
-        llm_decision = self._classify_with_llm(text)
-        if llm_decision:
-            return llm_decision
 
         return IntentDecision(
             route="mec",
@@ -529,6 +558,14 @@ class MessageOrchestratorAgent:
             for original_name, folded_name in self._active_teams_folded.items():
                 if "suporte" in folded_name:
                     return original_name
+        if "support" in normalized or "soporte" in normalized:
+            for original_name, folded_name in self._active_teams_folded.items():
+                if "support" in folded_name or "suporte" in folded_name or "soporte" in folded_name:
+                    return original_name
+
+        if "equipe" in normalized or "time" in normalized or "team" in normalized or "equipo" in normalized:
+            if TEAM_DEFAULT_HUMAN in self._active_teams:
+                return TEAM_DEFAULT_HUMAN
 
         if "mec" in normalized and "suporte" in {fold_text(t) for t in self._active_teams}:
             for original_name, folded_name in self._active_teams_folded.items():
@@ -569,6 +606,9 @@ class MessageOrchestratorAgent:
             "first_interaction": force_ia_label,
         }
         selected_human_team = self._pick_human_team(content)
+        resolved_human_team_id = await self.chatwoot.resolve_team_id(account_id, selected_human_team)
+        if resolved_human_team_id is None and CHATWOOT_HUMAN_TEAM_ID:
+            resolved_human_team_id = CHATWOOT_HUMAN_TEAM_ID
 
         # Rota: atendimento humano.
         if decision.route == "human":
@@ -592,7 +632,7 @@ class MessageOrchestratorAgent:
                     "handled_by": "human_team",
                     "orchestrator_confidence": 0.0,
                 },
-                team_id=selected_human_team,
+                team_id=resolved_human_team_id,
             )
             await self.chatwoot.set_conversation_open(conversation_id, account_id)
             return
@@ -663,7 +703,7 @@ class MessageOrchestratorAgent:
                 "handled_by": "human_team_after_low_confidence",
                 "orchestrator_confidence": specialist_result.confidence,
             },
-            team_id=selected_human_team,
+            team_id=resolved_human_team_id,
         )
         await self.chatwoot.set_conversation_open(conversation_id, account_id)
 

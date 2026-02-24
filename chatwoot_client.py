@@ -33,6 +33,61 @@ class ChatwootClient:
             headers={"api_access_token": api_token},
             timeout=30.0,
         )
+        self._team_cache: dict[str, int] = {}
+
+    async def _list_teams(self, account_id: int | str) -> list[dict[str, Any]]:
+        """Lista os times disponíveis na conta."""
+        url = f"/api/v1/accounts/{account_id}/teams"
+        response = await self.client.get(url)
+        response.raise_for_status()
+        data = response.json()
+        if isinstance(data, dict):
+            # Compatibilidade com diferentes formatos de resposta.
+            if isinstance(data.get("payload"), list):
+                return data["payload"]
+            if isinstance(data.get("data"), list):
+                return data["data"]
+        if isinstance(data, list):
+            return data
+        return []
+
+    async def resolve_team_id(
+        self,
+        account_id: int | str,
+        team_name_or_id: Optional[str],
+    ) -> Optional[int | str]:
+        """
+        Resolve nome de time para ID.
+
+        - Se já vier numérico, retorna como inteiro.
+        - Se vier nome, busca em cache e depois na API.
+        """
+        if not team_name_or_id:
+            return None
+
+        value = str(team_name_or_id).strip()
+        if not value:
+            return None
+
+        if value.isdigit():
+            return int(value)
+
+        folded = value.casefold()
+        cached = self._team_cache.get(folded)
+        if cached is not None:
+            return cached
+
+        try:
+            teams = await self._list_teams(account_id)
+            for team in teams:
+                name = str(team.get("name") or "").strip()
+                team_id = team.get("id")
+                if name and isinstance(team_id, int):
+                    self._team_cache[name.casefold()] = team_id
+            return self._team_cache.get(folded)
+        except Exception as exc:
+            logger.warning("Não foi possível resolver team_id para '%s': %s", value, exc)
+            return None
 
     async def send_message(
         self,
@@ -79,9 +134,21 @@ class ChatwootClient:
         Returns:
             Resposta da API
         """
-        url = f"/api/v1/accounts/{account_id}/conversations/{conversation_id}"
         payload = {"labels": labels}
-        response = await self.client.patch(url, json=payload)
+
+        # Endpoint oficial de labels do Chatwoot.
+        labels_url = f"/api/v1/accounts/{account_id}/conversations/{conversation_id}/labels"
+        response = await self.client.post(labels_url, json=payload)
+
+        # Fallback para versões/instâncias que aceitam labels via PATCH na conversa.
+        if response.status_code >= 400:
+            logger.warning(
+                "Falha ao atualizar labels via /labels (status=%s). Tentando fallback PATCH.",
+                response.status_code,
+            )
+            conversation_url = f"/api/v1/accounts/{account_id}/conversations/{conversation_id}"
+            response = await self.client.patch(conversation_url, json=payload)
+
         response.raise_for_status()
         return response.json()
 
@@ -90,7 +157,7 @@ class ChatwootClient:
         conversation_id: int,
         account_id: int | str,
         custom_attributes: Optional[dict[str, Any]] = None,
-        team_id: Optional[str] = None,
+        team_id: Optional[int | str] = None,
         clear_assignment: bool = False,
     ) -> dict[str, Any]:
         """
