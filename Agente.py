@@ -836,6 +836,34 @@ async def lifespan(app: FastAPI):  # noqa: D401
                 chatwoot_client._team_cache[name.casefold()] = tid
                 chatwoot_client._team_cache[_fold_text(name)] = tid
         logger.info("[startup] Times carregados: %s", {k: v for k, v in chatwoot_client._team_cache.items()})
+
+        # Se TEAM não foi configurado no .env, usa automaticamente os times do Chatwoot.
+        if not TEAM and teams:
+            api_team_names = [str(t.get("name") or "").strip() for t in teams if t.get("name")]
+            orchestrator_agent._active_teams = api_team_names
+            orchestrator_agent._active_teams_folded = {
+                n: fold_text(n) for n in api_team_names
+            }
+            logger.info("[startup] TEAM não configurado — times carregados da API: %s", api_team_names)
+        else:
+            logger.info("[startup] TEAM configurado via .env: %s", orchestrator_agent._active_teams)
+
+        # Reconstrói o prompt do classificador LLM com a lista final de times.
+        if orchestrator_agent._classifier_agent and orchestrator_agent._active_teams:
+            team_list = ", ".join(orchestrator_agent._active_teams)
+            orchestrator_agent._classifier_agent.instructions = (
+                "Você é um classificador de roteamento para atendimento. "
+                "Classifique a mensagem em uma rota: MEC, HUMAN ou DIRECT. "
+                "Use HUMAN quando o usuário pedir pessoa/time/suporte (qualquer idioma). "
+                f"Times disponíveis: {team_list}. "
+                "Se identificar um time específico na mensagem, responda: HUMAN:<nome_do_time> "
+                f"usando EXATAMENTE um dos nomes disponíveis ({team_list}). "
+                "Se não identificar time específico, responda apenas: HUMAN. "
+                "Use DIRECT para smalltalk/saudações/agradecimentos. "
+                "Use MEC para dúvidas acadêmicas, regulatórias e de documentos. "
+                "Exemplos: 'HUMAN:financeiro', 'HUMAN:suporte', 'HUMAN', 'MEC', 'DIRECT'."
+            )
+            logger.info("[startup] Prompt do classificador LLM atualizado com times: %s", team_list)
     except Exception as exc:
         logger.warning("[startup] Não foi possível pré-carregar times: %s", exc)
     # Agenda carregamento em background: servidor fica disponível IMEDIATAMENTE
