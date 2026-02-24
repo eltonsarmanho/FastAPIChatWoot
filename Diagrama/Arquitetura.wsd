@@ -1,0 +1,112 @@
+@startuml Arquitetura_Agente_RAG
+
+!define AWSPUML https://raw.githubusercontent.com/awslabs/aws-icons-for-plantuml/v14.0/dist
+!include AWSPUML/AmazonWebservices.puml
+!include AWSPUML/ApplicationIntegration/APIGateway.puml
+!include AWSPUML/Database/DynamoDB.puml
+
+skinparam linetype ortho
+skinparam monochrome false
+skinparam backgroundColor #FEFEFE
+
+' Definir cores customizadas
+!define COLOR_CHATWOOT #5C2E8A
+!define COLOR_AGENT #FF6B6B
+!define COLOR_RAG #4ECDC4
+!define COLOR_DB #45B7D1
+!define COLOR_USER #95E1D3
+
+package "Chatwoot" #COLOR_CHATWOOT {
+    component [Webhook\nMessage Created] as webhook
+    component [API REST] as chatwoot_api
+}
+
+package "Agente RAG FastAPI" #COLOR_AGENT {
+    component [FastAPI Server\nPort 8000] as fastapi_server
+    
+    package "Orquestrador (Agente 1)" #COLOR_AGENT {
+        component [MessageOrchestratorAgent] as orchestrator
+        component [Intent Classifier] as classifier
+        component [Label Manager] as label_manager
+    }
+    
+    package "Especialista (Agente 2)" #COLOR_AGENT {
+        component [MecSpecialistAgent] as specialist
+        component [Confidence Scorer] as confidence
+    }
+    
+    package "Sistema RAG" #COLOR_RAG {
+        component [RagSystem] as rag
+        component [Cache Manager] as cache
+        component [Document Loader] as doc_loader
+    }
+}
+
+package "Conhecimento" #COLOR_RAG {
+    database [LanceDB\nVector DB] as lancedb
+    folder [Docs Folder\n(Markdown)] as docs_folder
+}
+
+package "Persistência" #COLOR_DB {
+    database [SQLite\nSession DB] as sqlite
+}
+
+' Fluxo de mensagens
+webhook --> fastapi_server : POST /api/webhook
+fastapi_server --> orchestrator : process_and_reply()
+orchestrator --> classifier : classify_intent()
+classifier --> specialist : answer(question)
+specialist --> rag : ask(question)
+rag --> cache : get_cached_answer()
+rag --> doc_loader : load_documents()
+doc_loader --> docs_folder : read .md files
+doc_loader --> lancedb : insert vectors
+rag --> sqlite : get_agent_session()
+
+specialist --> confidence : evaluate_confidence()
+orchestrator --> label_manager : set_labels()
+label_manager --> chatwoot_api : PATCH /conversations/{id}
+
+orchestrator --> chatwoot_api : send_message()
+orchestrator --> chatwoot_api : set_team_assignment()
+
+chatwoot_api --> webhook : update_conversation
+
+' Legendas
+note right of orchestrator
+  **Rota:** Classifica intenção
+  - DIRECT: Small talk
+  - MEC: Domínio regulatório
+  - HUMAN: Escalada
+end note
+
+note right of specialist
+  **Retorna:** Resposta com confiança
+  - Consulta RAG
+  - Avalia segurança
+end note
+
+note right of rag
+  **Funcionalidades:**
+  - Busca vetorial semântica
+  - Cache com TTL
+  - Múltiplas sessões
+end note
+
+note right of lancedb
+  **Índice Vetorial:**
+  - Table: docs_knowledge
+  - Embeddings: SentenceTransformer
+  - Busca: Top-k resultados
+end note
+
+' Legenda de roteamento
+note bottom of classifier
+  **Padrões de Classificação:**
+  • Palavras-chave MEC
+  • Regex de pedidos humanos
+  • Detecção de small talk
+  • Classificador LLM (opcional)
+end note
+
+@enduml
