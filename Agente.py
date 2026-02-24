@@ -138,6 +138,7 @@ class IntentDecision:
     reason: str
     requested_human: bool = False
     requested_ai: bool = False
+    requested_team: str | None = None  # time extraído pelo LLM ou padrão
 
 
 # ---------------------------------------------------------------------------
@@ -349,7 +350,7 @@ class MessageOrchestratorAgent:
             r"\bhumano\b",
             r"\batendente\b",
             r"\bespecialista\b",
-            r"\bfinanceiro\b",
+            r"\bfinanceir\w*\b",  # financeiro, financeira, financeiros …
             r"\bsuporte\b",
             r"\bsupport\b",
             r"falar com (uma )?pessoa",
@@ -368,7 +369,7 @@ class MessageOrchestratorAgent:
             "hablar", "transferir", "escalar",
         }
         self._human_target_keywords = {
-            "humano", "pessoa", "atendente", "especialista", "equipe", "time", "suporte", "financeiro",
+            "humano", "pessoa", "atendente", "especialista", "equipe", "time", "suporte", "financeir",
             "human", "person", "agent", "team", "support",
             "persona", "agente", "equipo", "soporte",
         }
@@ -413,6 +414,7 @@ class MessageOrchestratorAgent:
 
         self._classifier_agent: Agent | None = None
         if ORCHESTRATOR_USE_LLM_CLASSIFIER:
+            team_list = ", ".join(self._active_teams) if self._active_teams else "suporte"
             self._classifier_agent = Agent(
                 model=self.specialist.rag.model,
                 name="Classificador de intenção",
@@ -422,9 +424,13 @@ class MessageOrchestratorAgent:
                     "Você é um classificador de roteamento para atendimento. "
                     "Classifique a mensagem em uma rota: MEC, HUMAN ou DIRECT. "
                     "Use HUMAN quando o usuário pedir pessoa/time/suporte (qualquer idioma). "
+                    f"Times disponíveis: {team_list}. "
+                    "Se identificar um time específico na mensagem, responda: HUMAN:<nome_do_time> "
+                    f"usando EXATAMENTE um dos nomes disponíveis ({team_list}). "
+                    "Se não identificar time específico, responda apenas: HUMAN. "
                     "Use DIRECT para smalltalk/saudações/agradecimentos. "
                     "Use MEC para dúvidas acadêmicas, regulatórias e de documentos. "
-                    "Retorne SOMENTE uma palavra em MAIÚSCULAS: MEC, HUMAN ou DIRECT."
+                    "Exemplos: 'HUMAN:financeiro', 'HUMAN:suporte', 'HUMAN', 'MEC', 'DIRECT'."
                 ),
             )
 
@@ -454,9 +460,25 @@ class MessageOrchestratorAgent:
             value_raw = (result.content or "").strip()
             value = normalize_text(value_raw)
 
-            # Aceita respostas com pontuação/explicação curta, ex: "HUMAN." ou "Route: MEC"
+            # Aceita respostas com pontuação/explicação curta, ex: "HUMAN." ou "HUMAN:financeiro"
             if "human" in value:
-                return IntentDecision(route="human", reason="llm_classifier", requested_human=False)
+                # Tenta extrair nome do time: "human:financeiro" ou "human: suporte"
+                team_match = re.search(r"human[:\s]+([a-z0-9_-]+)", value)
+                extracted_team = team_match.group(1).strip() if team_match else None
+                # Valida que o time extraído é um dos times ativos
+                if extracted_team and not any(
+                    extracted_team in fold_text(t) or fold_text(t) in extracted_team
+                    for t in self._active_teams
+                ):
+                    logger.debug("[llm] time extraído %r não reconhecido, ignorando.", extracted_team)
+                    extracted_team = None
+                logger.info("[llm_classifier] HUMAN detectado, time=%r", extracted_team)
+                return IntentDecision(
+                    route="human",
+                    reason="llm_classifier",
+                    requested_human=True,
+                    requested_team=extracted_team,
+                )
             if "direct" in value:
                 return IntentDecision(route="direct", reason="llm_classifier", requested_ai=False)
             if "mec" in value:
@@ -550,17 +572,26 @@ class MessageOrchestratorAgent:
                     return original_name
             return None
 
+        def _name_matches_text(folded_name: str, text: str) -> bool:
+            """Aceita nome exato ou formas flexionadas (ex.: 'financeira' → 'financeiro')."""
+            if folded_name in text:
+                return True
+            # Radical sem o último caractere cobre gênero/número (financeiro→financeir)
+            if len(folded_name) > 4:
+                return bool(re.search(r"\b" + re.escape(folded_name[:-1]), text))
+            return False
+
         # Se o usuário mencionou explicitamente um time ativo, prioriza ele.
         for original_name, folded_name in self._active_teams_folded.items():
-            if folded_name and folded_name in normalized:
+            if folded_name and _name_matches_text(folded_name, normalized):
                 return original_name
 
-        # Regras contextuais simples.
-        if "financeiro" in normalized:
+        # Regras contextuais simples (fallback).
+        if re.search(r"\bfinanceir", normalized):
             for original_name, folded_name in self._active_teams_folded.items():
                 if "financeiro" in folded_name:
                     return original_name
-        if "suporte" in normalized:
+        if re.search(r"\bsuport", normalized):
             for original_name, folded_name in self._active_teams_folded.items():
                 if "suporte" in folded_name:
                     return original_name
@@ -618,41 +649,64 @@ class MessageOrchestratorAgent:
             "orchestrator_ts": int(time.time()),
             "first_interaction": force_ia_label,
         }
-        selected_human_team = self._pick_human_team(content)
+        # Prioriza time extraído pelo LLM; fallback para regex.
+        selected_human_team = decision.requested_team or self._pick_human_team(content)
         resolved_human_team_id = await self.chatwoot.resolve_team_id(account_id, selected_human_team)
         if resolved_human_team_id is None and CHATWOOT_HUMAN_TEAM_ID:
             resolved_human_team_id = CHATWOOT_HUMAN_TEAM_ID
         logger.info(
-            "[orchestrator] human_route team_selected=%r team_id=%r",
+            "[orchestrator] human_route team_selected=%r team_id=%r source=%s",
             selected_human_team,
             resolved_human_team_id,
+            "llm" if decision.requested_team else "regex",
         )
 
         # Rota: atendimento humano.
         if decision.route == "human":
             if decision.reason == "explicit_human_request":
-                await self.chatwoot.send_message(
+                try:
+                    await self.chatwoot.send_message(
+                        conversation_id,
+                        account_id,
+                        "Entendido. Vou encaminhar seu atendimento para o time humano.",
+                    )
+                except Exception as exc:
+                    logger.warning("[human_route] Falha ao enviar mensagem de confirmação: %s", exc)
+
+            try:
+                labels = self._compose_state_labels(
+                    label_set,
+                    target_labels={CHATWOOT_LABEL_HUMANO},
+                )
+                await self.chatwoot.set_labels(conversation_id, account_id, labels)
+            except Exception as exc:
+                logger.warning("[human_route] Falha ao atualizar labels: %s", exc)
+
+            try:
+                await self.chatwoot.update_conversation_meta(
                     conversation_id,
                     account_id,
-                    "Entendido. Vou encaminhar seu atendimento para o time humano.",
+                    custom_attributes={
+                        **custom_attrs,
+                        "handled_by": "human_team",
+                        "orchestrator_confidence": 0.0,
+                    },
                 )
+            except Exception as exc:
+                logger.warning("[human_route] Falha ao atualizar custom_attributes: %s", exc)
 
-            labels = self._compose_state_labels(
-                label_set,
-                target_labels={CHATWOOT_LABEL_HUMANO},
-            )
-            await self.chatwoot.set_labels(conversation_id, account_id, labels)
-            await self.chatwoot.update_conversation_meta(
-                conversation_id,
-                account_id,
-                custom_attributes={
-                    **custom_attrs,
-                    "handled_by": "human_team",
-                    "orchestrator_confidence": 0.0,
-                },
-                team_id=resolved_human_team_id,
-            )
-            await self.chatwoot.set_conversation_open(conversation_id, account_id)
+            if resolved_human_team_id:
+                try:
+                    await self.chatwoot.assign_team(
+                        conversation_id, account_id, resolved_human_team_id
+                    )
+                except Exception as exc:
+                    logger.warning("[human_route] Falha ao atribuir time %s: %s", resolved_human_team_id, exc)
+
+            try:
+                await self.chatwoot.set_conversation_open(conversation_id, account_id)
+            except Exception as exc:
+                logger.warning("[human_route] Falha ao abrir conversa: %s", exc)
             return
 
         # Rota: resposta direta do próprio orquestrador.

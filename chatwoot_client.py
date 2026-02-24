@@ -182,7 +182,54 @@ class ChatwootClient:
             conversation_url = f"/api/v1/accounts/{account_id}/conversations/{conversation_id}"
             response = await self.client.patch(conversation_url, json=payload)
 
-        response.raise_for_status()
+        if response.status_code >= 400:
+            logger.error(
+                "Falha ao atualizar labels (status=%s): %s",
+                response.status_code,
+                response.text[:200],
+            )
+            return {"error": response.status_code}
+
+        return response.json()
+
+    async def assign_team(
+        self,
+        conversation_id: int,
+        account_id: int | str,
+        team_id: int | str,
+    ) -> dict[str, Any]:
+        """
+        Atribui uma conversa a um time específico via endpoint dedicado.
+
+        Args:
+            conversation_id: ID da conversa
+            account_id: ID da conta
+            team_id: ID do time
+
+        Returns:
+            Resposta da API
+        """
+        url = f"/api/v1/accounts/{account_id}/conversations/{conversation_id}/assignments"
+        payload = {"team_id": team_id}
+        response = await self.client.post(url, json=payload)
+
+        if response.status_code >= 400:
+            # Fallback: PATCH direto na conversa
+            logger.warning(
+                "[assign_team] /assignments falhou (status=%s), tentando PATCH. body=%s",
+                response.status_code, response.text[:200],
+            )
+            conv_url = f"/api/v1/accounts/{account_id}/conversations/{conversation_id}"
+            response = await self.client.patch(conv_url, json={"team_id": team_id})
+
+        if response.status_code >= 400:
+            logger.error(
+                "[assign_team] Falha ao atribuir time %s à conversa %s (status=%s): %s",
+                team_id, conversation_id, response.status_code, response.text[:200],
+            )
+            return {"error": response.status_code}
+
+        logger.info("[assign_team] time_id=%s atribuído à conversa %s", team_id, conversation_id)
         return response.json()
 
     async def update_conversation_meta(
