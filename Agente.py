@@ -75,6 +75,28 @@ ORCHESTRATOR_USE_LLM_CLASSIFIER: bool = os.getenv(
 
 
 # ---------------------------------------------------------------------------
+# Instruções dos agentes por tipo de canal
+# ---------------------------------------------------------------------------
+_INSTRUCTIONS_CHAT: str = (
+    "Você é um assistente inteligente especializado nos documentos internos da organização.\n"
+    "Responda de forma clara, objetiva e precisa utilizando o conhecimento disponível nos documentos.\n"
+    "Caso a informação não esteja disponível nos documentos, informe ao usuário de forma educada.\n"
+    "Responda sempre no mesmo idioma da pergunta."
+)
+
+_INSTRUCTIONS_EMAIL: str = (
+    "Você é um assistente institucional que responde e-mails formais em nome da organização.\n"
+    "Utilize sempre linguagem formal e institucional em suas respostas.\n"
+    "Estrutura obrigatória da resposta:\n"
+    "  - Inicie com saudação formal: 'Prezado(a),'\n"
+    "  - Desenvolva a resposta de forma completa, clara e embasada nos documentos internos.\n"
+    "  - Finalize com: 'Atenciosamente,\\nEquipe de Suporte'\n"
+    "Caso a informação não esteja disponível nos documentos, informe com educação e formalidade.\n"
+    "Responda sempre no mesmo idioma da pergunta."
+)
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 class _HTMLStripper(HTMLParser):
@@ -130,6 +152,14 @@ def looks_like_no_answer(answer: str) -> bool:
         "nao consta nos documentos",
     ]
     return any(marker in normalized for marker in fallback_markers)
+
+
+def get_channel_type(channel: str) -> str:
+    """Retorna 'email' ou 'chat' com base no tipo de canal do Chatwoot.
+
+    Chatwoot usa nomes como 'Channel::EmailChannel', 'Channel::WebWidget', etc.
+    """
+    return "email" if "email" in (channel or "").lower() else "chat"
 
 
 @dataclass
@@ -228,12 +258,17 @@ class RagSystem:
     # ------------------------------------------------------------------
     # Gerenciamento de agentes por sessão
     # ------------------------------------------------------------------
-    def get_agent(self, session_id: str) -> Agent:
+    def get_agent(self, session_id: str, channel_type: str = "chat") -> Agent:
         """
         Retorna o agente associado a uma sessão (conversa do Chatwoot).
         Cria um novo agente se ainda não existir para esta sessão.
+
+        Args:
+            session_id:   ID único da conversa (ex.: 'chatwoot_123').
+            channel_type: 'email' ou 'chat' – define tom e formato das respostas.
         """
         if session_id not in self._agents:
+            instructions = _INSTRUCTIONS_EMAIL if channel_type == "email" else _INSTRUCTIONS_CHAT
             db = SqliteDb(db_file=DB_FILE)
             self._agents[session_id] = Agent(
                 model=self.model,
@@ -244,16 +279,14 @@ class RagSystem:
                 search_knowledge=False,
                 add_knowledge_to_context=True,
                 telemetry=False,
-                instructions="""Você é um assistente inteligente especializado nos documentos internos da organização.
-Responda de forma clara, objetiva e precisa utilizando o conhecimento disponível nos documentos.
-Caso a informação não esteja disponível nos documentos, informe ao usuário de forma educada.
-Responda sempre no mesmo idioma da pergunta.""",
+                instructions=instructions,
             )
-            logger.info(f"Novo agente criado para sessão: {session_id}")
+            logger.info(f"Novo agente criado para sessão: {session_id} (canal={channel_type})")
         return self._agents[session_id]
 
     @staticmethod
     def _normalize_question(question: str) -> str:
+        
         return re.sub(r"\s+", " ", question.strip().lower())
 
     @staticmethod
@@ -299,18 +332,21 @@ Responda sempre no mesmo idioma da pergunta.""",
     # ------------------------------------------------------------------
     # Processamento de perguntas
     # ------------------------------------------------------------------
-    def ask(self, question: str, session_id: str) -> str:
+    def ask(self, question: str, session_id: str, channel_type: str = "chat") -> str:
         """
         Envia uma pergunta ao agente da sessão e retorna a resposta.
 
         Args:
-            question:   Texto da pergunta/mensagem do usuário.
-            session_id: ID único da conversa (ex.: 'chatwoot_123').
+            question:     Texto da pergunta/mensagem do usuário.
+            session_id:   ID único da conversa (ex.: 'chatwoot_123').
+            channel_type: 'email' ou 'chat' – define tom e formato das respostas.
 
         Returns:
             Texto da resposta gerada pelo agente.
         """
-        if self._is_quick_smalltalk(question):
+        # Para e-mail sempre gera resposta completa (ignora atalho de smalltalk),
+        # pois e-mails formais merecem resposta elaborada mesmo para saudações.
+        if channel_type != "email" and self._is_quick_smalltalk(question):
             return (
                 "Olá! Posso te ajudar com dúvidas sobre os documentos internos. "
                 "Me diga sua pergunta."
@@ -321,7 +357,7 @@ Responda sempre no mesmo idioma da pergunta.""",
             logger.debug(f"[cache] hit sessão={session_id}")
             return cached
 
-        agent = self.get_agent(session_id)
+        agent = self.get_agent(session_id, channel_type)
         response = agent.run(question)
         answer = response.content or "Não foi possível gerar uma resposta."
         self._cache_answer(session_id, question, answer)
@@ -625,7 +661,14 @@ class MessageOrchestratorAgent:
         return TEAM_DEFAULT_HUMAN if TEAM_DEFAULT_HUMAN else None
 
     @staticmethod
-    def _direct_answer(message: str) -> str:
+    def _direct_answer(message: str, channel_type: str = "chat") -> str:
+        if channel_type == "email":
+            return (
+                "Prezado(a),\n\n"
+                "Agradecemos o seu contato. Estamos à disposição para responder suas dúvidas "
+                "sobre documentos e regras acadêmicas da instituição.\n\n"
+                "Atenciosamente,\nEquipe de Suporte"
+            )
         text = normalize_text(message)
         if text in {"oi", "ola", "olá", "bom dia", "boa tarde", "boa noite"}:
             return "Olá! Posso ajudar com dúvidas acadêmicas e regulatórias. Qual sua pergunta?"
@@ -638,6 +681,7 @@ class MessageOrchestratorAgent:
         content: str,
         current_labels: list[str],
         force_ia_label: bool = False,
+        channel_type: str = "chat",
     ) -> None:
         label_set = set(current_labels)
         decision = self.classify_intent(content, label_set)
@@ -711,7 +755,7 @@ class MessageOrchestratorAgent:
 
         # Rota: resposta direta do próprio orquestrador.
         if decision.route == "direct":
-            answer = self._direct_answer(content)
+            answer = self._direct_answer(content, channel_type)
             await self.chatwoot.send_message(conversation_id, account_id, answer)
             labels = self._compose_state_labels(
                 label_set,
@@ -732,7 +776,9 @@ class MessageOrchestratorAgent:
             return
 
         # Rota: especialista MEC (Agente 2)
-        specialist_result = await asyncio.to_thread(self.specialist.answer, content, session_id)
+        specialist_result = await asyncio.to_thread(
+            self.specialist.answer, content, session_id, channel_type
+        )
         high_confidence = specialist_result.confidence >= ORCHESTRATOR_CONFIDENCE_THRESHOLD
 
         if high_confidence:
@@ -893,16 +939,21 @@ async def process_and_reply(
     account_id: int | str,
     current_labels: list[str],
     force_ia_label: bool = False,
+    channel_type: str = "chat",
 ) -> None:
     """Executa o fluxo hierárquico do orquestrador."""
     try:
-        logger.info(f"[conv #{conversation_id}] Mensagem recebida para orquestração.")
+        logger.info(
+            f"[conv #{conversation_id}] Mensagem recebida para orquestração "
+            f"(canal={channel_type})."
+        )
         await orchestrator_agent.handle_incoming(
             conversation_id=conversation_id,
             account_id=account_id,
             content=content,
             current_labels=current_labels,
             force_ia_label=force_ia_label,
+            channel_type=channel_type,
         )
     except httpx.HTTPStatusError as exc:
         logger.error(f"Erro HTTP na orquestração: {exc.response.status_code} – {exc.response.text}")
@@ -939,8 +990,10 @@ async def chatwoot_webhook(request: Request, background_tasks: BackgroundTasks, 
     # ── Leitura do payload ─────────────────────────────────────────────────
     try:
         payload: dict = await request.json()
-    except Exception:
-        raise HTTPException(status_code=400, detail="Payload JSON inválido.")
+    except Exception as exc:
+        # Retorna 200 para evitar que o Ngrok/Chatwoot receba 4xx e tente reenviar.
+        logger.warning(f"Webhook com payload JSON inválido: {exc}")
+        return JSONResponse({"status": "ok", "warning": "invalid_json"})
 
     # Log completo do payload (nível DEBUG – visível com LOG_LEVEL=DEBUG)
     logger.debug(f"Payload recebido:\n{payload}")
@@ -999,6 +1052,14 @@ async def chatwoot_webhook(request: Request, background_tasks: BackgroundTasks, 
         account: dict = payload.get("account") or {}
         account_id: int | str = account.get("id") or CHATWOOT_ACCOUNT_ID
 
+        # ── Detecção de canal (Email vs Chat) ─────────────────────────────
+        # O Chatwoot informa o canal em conversation.channel:
+        #   'Channel::EmailChannel'  → e-mail
+        #   'Channel::WebWidget'     → chat web
+        #   'Channel::Whatsapp'      → WhatsApp, etc.
+        inbox_channel: str = conversation.get("channel") or ""
+        channel_type: str = get_channel_type(inbox_channel)
+
         # Informações do sender apenas para log
         sender: dict = payload.get("sender") or {}
         sender_name: str = sender.get("name", "?")
@@ -1007,6 +1068,7 @@ async def chatwoot_webhook(request: Request, background_tasks: BackgroundTasks, 
             logger.info(
                 f"Mensagem enfileirada – conv #{conversation_id} "
                 f"| sender={sender_name!r} "
+                f"| canal={channel_type!r} (inbox={inbox_channel!r}) "
                 f"| conteúdo={content[:80]!r}"
             )
             background_tasks.add_task(
@@ -1016,10 +1078,12 @@ async def chatwoot_webhook(request: Request, background_tasks: BackgroundTasks, 
                 account_id,
                 current_labels,
                 force_ia_label,
+                channel_type,
             )
         else:
             logger.debug(
                 f"Mensagem ignorada – conv={conversation_id} "
+                f"canal={channel_type!r} "
                 f"content_raw={raw_content[:60]!r}"
             )
 
