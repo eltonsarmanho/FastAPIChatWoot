@@ -14,11 +14,15 @@ model = SentenceTransformer('all-MiniLM-L6-v2')
 intent_examples = {
     "HUMAN": [
         "Quero falar com suporte",
-        "Quero falar com humano",
-        "Me encaminhe para a equipe de financeiro",
+        "Quero falar com um humano",
+        "Me encaminhe para a equipe financeira",
         "Preciso falar com um atendente",
         "Quero conversar com o time de suporte",
-        
+        "Gostaria de ser atendido por uma pessoa",
+        "Quero contato com o suporte humano",
+        "Preciso de atendimento pessoal",
+        "Me transfira para um agente humano",
+        "Quero falar com alguém da equipe",
     ],
     "MEC": [
         "Como faço um processo de crédito?",
@@ -26,7 +30,11 @@ intent_examples = {
         "O que diz a resolução sobre TCC?",
         "Como solicitar credenciamento?",
         "Qual a carga horária mínima?",
-       
+        "Como funciona o processo de matrícula?",
+        "Quais são os documentos necessários para inscrição?",
+        "Como consultar o histórico escolar?",
+        "Qual o procedimento para trancamento de matrícula?",
+        "Como solicitar declaração de matrícula?",
     ],
     "DIRECT": [
         "Oi, tudo bem?",
@@ -34,7 +42,11 @@ intent_examples = {
         "Obrigado",
         "Valeu",
         "Tudo certo",
-      
+        "Olá!",
+        "Boa tarde!",
+        "Como vai?",
+        "Até mais",
+        "Tchau",
     ],
 }
 
