@@ -17,7 +17,6 @@ package "Camada de Comunicacao FastAPI" {
 
 package "Camada de Agentes (Backend)" {
     component Agente1 as "Agente 1 - Orquestrador\n(Intencao, roteamento\nlabels)"
-    component Agente2 as "Agente 2 - Especialista NEES-MEC\n(RAG focado)"
 }
 
 package "Equipe Externa" {
@@ -39,10 +38,9 @@ Chatwoot --> FastAPIWebhook : Webhook HTTP
 
 ' Orquestracao
 FastAPIWebhook --> Agente1 : Encaminha mensagem
-Agente1 --> Agente2 : Rota MEC (quando aplicavel)
+Agente1 --> Agente2Externo : Rota MEC (quando aplicavel)
 
-' Agente 2 externo (alvo futuro)
-Agente2 ..> Agente2Externo : Integracao prevista
+
 
 ' Persistencia e resposta no Chatwoot via cliente
 FastAPIWebhook --> ChatwootClient : Opera conversas
