@@ -451,13 +451,17 @@ class MessageOrchestratorAgent:
             return (
                 "Prezado(a),\n\n"
                 "Agradecemos o seu contato. Estamos à disposição para responder suas dúvidas "
-                "sobre documentos e regras acadêmicas da instituição.\n\n"
+                "sobre documentos e processos no sistema.\n\n"
                 "Atenciosamente,\nEquipe de Suporte"
             )
         text = normalize_text(message)
-        if text in {"oi", "ola", "olá", "bom dia", "boa tarde", "boa noite"}:
-            return "Olá! Posso ajudar com dúvidas acadêmicas e regulatórias. Qual sua pergunta?"
-        return "Entendi. Posso te ajudar com dúvidas sobre os documentos e regras acadêmicas."
+        _greeting_words = {"oi", "ola", "olá", "bom dia", "boa tarde", "boa noite", "hey","hei"}
+        _thanks_words = {"obrigado", "obrigada", "valeu", "grato", "grata", "de nada", "thank you"}
+        if text in _greeting_words or any(text.startswith(w) for w in _greeting_words):
+            return "Olá! Posso ajudar com alguma dúvida. Qual sua pergunta?"
+        if text in _thanks_words or any(w in text for w in _thanks_words):
+            return "De nada! Agradecemos o seu contato. Estamos à disposição para responder suas dúvidas."
+        return "Entendi. Posso te ajudar com dúvidas sobre os documentos e processos do sistema."
 
     async def handle_incoming(
         self,
