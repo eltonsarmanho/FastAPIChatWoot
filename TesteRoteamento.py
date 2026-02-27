@@ -4,6 +4,7 @@ Classificador de Intenção baseado em Embeddings Semânticos
 Modelo gratuito: all-MiniLM-L6-v2 (multilíngue, rápido, ~22MB)
 """
 
+
 import os
 import logging
 from dotenv import load_dotenv
