@@ -56,7 +56,7 @@ LOG_LEVEL=INFO
 ## Execução
 
 ```bash
-uvicorn Agente:app --host 0.0.0.0 --port 8000
+uvicorn OrquestradorAPI:app --host 0.0.0.0 --port 8000
 ```
 
 O servidor estará disponível em `http://localhost:8000`
@@ -77,8 +77,9 @@ curl -X POST http://localhost:8000/reload-docs
 
 ```
 .
-├── Agente.py                # Agente principal e RAG
-├── Agente2.py               # Agente especialista MEC
+├── OrquestradorAPI.py       # Orquestrador principal (FastAPI + webhook)
+├── Agente2.py               # Agente especialista MEC + Sistema RAG
+├── ClassificadorIntencao.py  # Classificador NLU de intenções (HuggingFace)
 ├── chatwoot_client.py       # Cliente API Chatwoot
 ├── Docs/                    # Documentos Markdown
 │   ├── Regimento_Interno_Docling.md

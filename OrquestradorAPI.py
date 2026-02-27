@@ -21,21 +21,16 @@ import unicodedata
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from html.parser import HTMLParser
-from pathlib import Path
-from typing import Dict, Literal
+from typing import Literal
 
 import httpx
 from agno.agent import Agent
-from agno.db.sqlite.sqlite import SqliteDb
-from agno.knowledge.embedder.sentence_transformer import SentenceTransformerEmbedder
-from agno.knowledge.knowledge import Knowledge
-from agno.models.openai import OpenAILike
-from agno.vectordb.lancedb import LanceDb
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
-from Agente2 import MecSpecialistAgent
-from chatwoot_client import ChatwootClient
+from Agente2 import MecSpecialistAgent, RagSystem, looks_like_no_answer
+from ChatwootClient import ChatwootClient
+from ClassificadorIntencao import OrquestradorHF
 
 # ---------------------------------------------------------------------------
 # Configuração
@@ -49,18 +44,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger("agente_rag")
 
-MARITALK_API_KEY: str = os.getenv("MARITALK_API_KEY", "")
 CHATWOOT_API_URL: str = os.getenv("CHATWOOT_API_URL", "http://localhost:3000")
 CHATWOOT_API_TOKEN: str = os.getenv("CHATWOOT_API_TOKEN", "")
 ROBO_TOKEN: str = os.getenv("ROBO_TOKEN", "")
 CHATWOOT_ACCOUNT_ID: str = os.getenv("CHATWOOT_ACCOUNT_ID", "1")
 WEBHOOK_TOKEN: str = os.getenv("WEBHOOK_TOKEN", "")  # ?token= na URL do webhook
 DOCS_FOLDER: str = os.getenv("DOCS_FOLDER", "Docs")
-DB_FILE: str = os.getenv("DB_FILE", "data.db")
-LANCEDB_URI: str = os.getenv("LANCEDB_URI", "lancedb")
-RAG_MAX_DOCS: int = int(os.getenv("RAG_MAX_DOCS", "5"))
 RESPONSE_CACHE_TTL_SECONDS: int = int(os.getenv("RESPONSE_CACHE_TTL_SECONDS", "300"))
-RESPONSE_CACHE_MAX_ITEMS: int = int(os.getenv("RESPONSE_CACHE_MAX_ITEMS", "256"))
 CHATWOOT_LABEL_HUMANO: str = os.getenv("CHATWOOT_LABEL_HUMANO", "humano")
 CHATWOOT_LABEL_IA_ORQUESTRADOR: str = os.getenv("CHATWOOT_LABEL_IA_ORQUESTRADOR", "ia_orquestrador")
 CHATWOOT_LABEL_IA_MEC: str = os.getenv("CHATWOOT_LABEL_IA_MEC", "ia_mec")
@@ -72,28 +62,6 @@ ORCHESTRATOR_CONFIDENCE_THRESHOLD: float = float(os.getenv("ORCHESTRATOR_CONFIDE
 ORCHESTRATOR_USE_LLM_CLASSIFIER: bool = os.getenv(
     "ORCHESTRATOR_USE_LLM_CLASSIFIER", "false"
 ).lower() in {"1", "true", "yes", "on"}
-
-
-# ---------------------------------------------------------------------------
-# Instruções dos agentes por tipo de canal
-# ---------------------------------------------------------------------------
-_INSTRUCTIONS_CHAT: str = (
-    "Você é um assistente inteligente especializado nos documentos internos da organização.\n"
-    "Responda de forma clara, objetiva e precisa utilizando o conhecimento disponível nos documentos.\n"
-    "Caso a informação não esteja disponível nos documentos, informe ao usuário de forma educada.\n"
-    "Responda sempre no mesmo idioma da pergunta."
-)
-
-_INSTRUCTIONS_EMAIL: str = (
-    "Você é um assistente institucional que responde e-mails formais em nome da organização.\n"
-    "Utilize sempre linguagem formal e institucional em suas respostas.\n"
-    "Estrutura obrigatória da resposta:\n"
-    "  - Inicie com saudação formal: 'Prezado(a),'\n"
-    "  - Desenvolva a resposta de forma completa, clara e embasada nos documentos internos.\n"
-    "  - Finalize com: 'Atenciosamente,\\nEquipe de Suporte'\n"
-    "Caso a informação não esteja disponível nos documentos, informe com educação e formalidade.\n"
-    "Responda sempre no mesmo idioma da pergunta."
-)
 
 
 # ---------------------------------------------------------------------------
@@ -138,22 +106,6 @@ def parse_csv(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
-def looks_like_no_answer(answer: str) -> bool:
-    """Heurística simples para identificar quando a IA não encontrou resposta suficiente."""
-    normalized = answer.strip().lower()
-    fallback_markers = [
-        "não encontrei",
-        "nao encontrei",
-        "não está disponível",
-        "nao esta disponivel",
-        "não tenho essa informação",
-        "nao tenho essa informacao",
-        "não consta nos documentos",
-        "nao consta nos documentos",
-    ]
-    return any(marker in normalized for marker in fallback_markers)
-
-
 def get_channel_type(channel: str) -> str:
     """Retorna 'email' ou 'chat' com base no tipo de canal do Chatwoot.
 
@@ -169,199 +121,6 @@ class IntentDecision:
     requested_human: bool = False
     requested_ai: bool = False
     requested_team: str | None = None  # time extraído pelo LLM ou padrão
-
-
-# ---------------------------------------------------------------------------
-# Sistema RAG
-# ---------------------------------------------------------------------------
-class RagSystem:
-    """Gerencia a base de conhecimento e os agentes por sessão."""
-
-    def __init__(self) -> None:
-        if not MARITALK_API_KEY:
-            raise ValueError("MARITALK_API_KEY é obrigatória no arquivo .env")
-
-        self._agents: Dict[str, Agent] = {}
-        self._response_cache: dict[tuple[str, str], tuple[str, float]] = {}
-        self._setup_model()
-        self._setup_knowledge()
-
-    # ------------------------------------------------------------------
-    # Inicialização dos componentes
-    # ------------------------------------------------------------------
-    def _setup_model(self) -> None:
-        """Configura o modelo de linguagem (Maritaca Sabiá-3)."""
-        self.model = OpenAILike(
-            id="sabiazinho-4",
-            name="Maritaca Sabia 4",
-            api_key=MARITALK_API_KEY,
-            base_url="https://chat.maritaca.ai/api",
-            temperature=0,
-        )
-
-    def _setup_knowledge(self) -> None:
-        """Configura a base de conhecimento vetorial com LanceDB."""
-        embedder = SentenceTransformerEmbedder()
-        vector_db = LanceDb(
-            table_name="docs_knowledge",
-            uri=LANCEDB_URI,
-            embedder=embedder,
-        )
-        self.knowledge = Knowledge(
-            name="Documentos Internos",
-            vector_db=vector_db,
-            max_results=RAG_MAX_DOCS,
-        )
-
-    # ------------------------------------------------------------------
-    # Carregamento de documentos
-    # ------------------------------------------------------------------
-    def load_documents(self, recreate: bool = False) -> None:
-        """
-        Carrega todos os arquivos .md da pasta Docs na base de conhecimento.
-
-        Args:
-            recreate: Se True, limpa e recarrega todos os vetores.
-        """
-        docs_path = Path(DOCS_FOLDER)
-        if not docs_path.exists():
-            logger.warning(f"Pasta de documentos não encontrada: {DOCS_FOLDER}")
-            return
-
-        md_files = list(docs_path.glob("**/*.md"))
-        if not md_files:
-            logger.warning(f"Nenhum arquivo .md encontrado em {DOCS_FOLDER}")
-            return
-
-        logger.info(f"Carregando {len(md_files)} documento(s) de '{DOCS_FOLDER}'...")
-
-        if recreate:
-            try:
-                self.knowledge.remove_all_content()
-                logger.info("Base de conhecimento limpa para recriação.")
-            except Exception as exc:
-                logger.warning(f"Não foi possível limpar a base: {exc}")
-
-        for md_file in md_files:
-            try:
-                self.knowledge.insert(
-                    name=md_file.stem,
-                    path=str(md_file),
-                    skip_if_exists=not recreate,
-                )
-                logger.info(f"  ✓ {md_file.name}")
-            except Exception as exc:
-                logger.error(f"  ✗ Erro ao carregar '{md_file.name}': {exc}")
-
-        logger.info("Documentos carregados com sucesso!")
-
-    # ------------------------------------------------------------------
-    # Gerenciamento de agentes por sessão
-    # ------------------------------------------------------------------
-    def get_agent(self, session_id: str, channel_type: str = "chat") -> Agent:
-        """
-        Retorna o agente associado a uma sessão (conversa do Chatwoot).
-        Cria um novo agente se ainda não existir para esta sessão.
-
-        Args:
-            session_id:   ID único da conversa (ex.: 'chatwoot_123').
-            channel_type: 'email' ou 'chat' – define tom e formato das respostas.
-        """
-        if session_id not in self._agents:
-            instructions = _INSTRUCTIONS_EMAIL if channel_type == "email" else _INSTRUCTIONS_CHAT
-            db = SqliteDb(db_file=DB_FILE)
-            self._agents[session_id] = Agent(
-                model=self.model,
-                name="Assistente RAG",
-                knowledge=self.knowledge,
-                db=db,
-                session_id=session_id,
-                search_knowledge=False,
-                add_knowledge_to_context=True,
-                telemetry=False,
-                instructions=instructions,
-            )
-            logger.info(f"Novo agente criado para sessão: {session_id} (canal={channel_type})")
-        return self._agents[session_id]
-
-    @staticmethod
-    def _normalize_question(question: str) -> str:
-        
-        return re.sub(r"\s+", " ", question.strip().lower())
-
-    @staticmethod
-    def _is_quick_smalltalk(question: str) -> bool:
-        q = RagSystem._normalize_question(question)
-        if len(q) > 40:
-            return False
-        return q in {
-            "oi",
-            "ola",
-            "olá",
-            "bom dia",
-            "boa tarde",
-            "boa noite",
-            "tudo bem",
-            "ok",
-            "obrigado",
-            "obrigada",
-            "valeu",
-        }
-
-    def _get_cached_answer(self, session_id: str, question: str) -> str | None:
-        key = (session_id, self._normalize_question(question))
-        cached = self._response_cache.get(key)
-        if not cached:
-            return None
-        answer, ts = cached
-        if (time.time() - ts) > RESPONSE_CACHE_TTL_SECONDS:
-            self._response_cache.pop(key, None)
-            return None
-        return answer
-
-    def _cache_answer(self, session_id: str, question: str, answer: str) -> None:
-        if not answer:
-            return
-        if len(self._response_cache) >= RESPONSE_CACHE_MAX_ITEMS:
-            # Remove item mais antigo para manter o cache pequeno e rápido.
-            oldest_key = min(self._response_cache, key=lambda k: self._response_cache[k][1])
-            self._response_cache.pop(oldest_key, None)
-        key = (session_id, self._normalize_question(question))
-        self._response_cache[key] = (answer, time.time())
-
-    # ------------------------------------------------------------------
-    # Processamento de perguntas
-    # ------------------------------------------------------------------
-    def ask(self, question: str, session_id: str, channel_type: str = "chat") -> str:
-        """
-        Envia uma pergunta ao agente da sessão e retorna a resposta.
-
-        Args:
-            question:     Texto da pergunta/mensagem do usuário.
-            session_id:   ID único da conversa (ex.: 'chatwoot_123').
-            channel_type: 'email' ou 'chat' – define tom e formato das respostas.
-
-        Returns:
-            Texto da resposta gerada pelo agente.
-        """
-        # Para e-mail sempre gera resposta completa (ignora atalho de smalltalk),
-        # pois e-mails formais merecem resposta elaborada mesmo para saudações.
-        if channel_type != "email" and self._is_quick_smalltalk(question):
-            return (
-                "Olá! Posso te ajudar com dúvidas sobre os documentos internos. "
-                "Me diga sua pergunta."
-            )
-
-        cached = self._get_cached_answer(session_id, question)
-        if cached:
-            logger.debug(f"[cache] hit sessão={session_id}")
-            return cached
-
-        agent = self.get_agent(session_id, channel_type)
-        response = agent.run(question)
-        answer = response.content or "Não foi possível gerar uma resposta."
-        self._cache_answer(session_id, question, answer)
-        return answer
 
 
 class MessageOrchestratorAgent:
@@ -448,6 +207,7 @@ class MessageOrchestratorAgent:
             "ok",
         }
 
+        self._hf_classifier = OrquestradorHF(threshold=0.5)
         self._classifier_agent: Agent | None = None
         if ORCHESTRATOR_USE_LLM_CLASSIFIER:
             team_list = ", ".join(self._active_teams) if self._active_teams else "suporte"
@@ -487,6 +247,26 @@ class MessageOrchestratorAgent:
 
     def _is_smalltalk(self, text: str) -> bool:
         return text in self._smalltalk
+
+    def _classify_with_hf(self, text: str) -> IntentDecision | None:
+        try:
+            best_intent, confidence = self._hf_classifier.classify(text)
+            logger.info(f"[hf_classifier] Intenção detectada: {best_intent} ({confidence:.2f})")
+            
+            if best_intent == "HUMAN":
+                return IntentDecision(
+                    route="human",
+                    reason="hf_classifier",
+                    requested_human=True,
+                    requested_team=None,
+                )
+            if best_intent == "DIRECT":
+                return IntentDecision(route="direct", reason="hf_classifier", requested_ai=False)
+            if best_intent == "MEC":
+                return IntentDecision(route="mec", reason="hf_classifier", requested_ai=False)
+        except Exception as exc:
+            logger.warning(f"Falha no classificador HF do orquestrador: {exc}")
+        return None
 
     def _classify_with_llm(self, text: str) -> IntentDecision | None:
         if not self._classifier_agent:
@@ -559,6 +339,11 @@ class MessageOrchestratorAgent:
                 requested_human=False,
                 requested_ai=True,
             )
+
+        # Classificação dinâmica por Hugging Face
+        hf_decision = self._classify_with_hf(text)
+        if hf_decision:
+            return hf_decision
 
         # Classificação dinâmica por LLM (quando habilitada).
         # Mantemos prioridades explícitas acima (pedido humano/IA e lock humano) por segurança.
@@ -914,7 +699,9 @@ async def lifespan(app: FastAPI):  # noqa: D401
         logger.warning("[startup] Não foi possível pré-carregar times: %s", exc)
     # Agenda carregamento em background: servidor fica disponível IMEDIATAMENTE
     asyncio.create_task(_load_docs_background())
-    logger.info("Servidor pronto! Documentos sendo carregados em background...")
+    # Pré-aquece o classificador HF (carrega modelo SentenceTransformer em background).
+    asyncio.create_task(asyncio.to_thread(orchestrator_agent._hf_classifier.warmup))
+    logger.info("Servidor pronto! Documentos e classificador sendo carregados em background...")
     yield
     logger.info("Encerrando o Agente RAG.")
 
@@ -1142,4 +929,4 @@ async def reload_documents(recreate: bool = False):
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("Agente:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("OrquestradorAPI:app", host="0.0.0.0", port=8000, reload=True)
