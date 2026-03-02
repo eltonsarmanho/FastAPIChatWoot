@@ -49,6 +49,9 @@ CHATWOOT_API_URL=http://localhost:3000
 CHATWOOT_API_TOKEN=seu_token_aqui
 CHATWOOT_ACCOUNT_ID=1
 WEBHOOK_TOKEN=seu_token_webhook
+AGENTE2_API_URL=http://18.220.237.166:8001/chat
+AGENTE2_API_TOKEN=seu_token_agente2
+AGENTE2_API_TIMEOUT_SECONDS=30
 DOCS_FOLDER=Docs
 LOG_LEVEL=INFO
 ```
@@ -60,6 +63,8 @@ uvicorn OrquestradorAPI:app --host 0.0.0.0 --port 8000
 ```
 
 O servidor estará disponível em `http://localhost:8000`
+
+Se `AGENTE2_API_URL` estiver definido, o orquestrador envia a pergunta do usuário para esse endpoint externo (via `x-token`) e usa a resposta retornada.
 
 ### Health Check
 

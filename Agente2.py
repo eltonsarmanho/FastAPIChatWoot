@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict
 
+import httpx
 from agno.agent import Agent
 from agno.db.sqlite.sqlite import SqliteDb
 from agno.knowledge.embedder.sentence_transformer import SentenceTransformerEmbedder
@@ -43,6 +44,9 @@ LANCEDB_URI: str = os.getenv("LANCEDB_URI", "lancedb")
 RAG_MAX_DOCS: int = int(os.getenv("RAG_MAX_DOCS", "5"))
 RESPONSE_CACHE_TTL_SECONDS: int = int(os.getenv("RESPONSE_CACHE_TTL_SECONDS", "300"))
 RESPONSE_CACHE_MAX_ITEMS: int = int(os.getenv("RESPONSE_CACHE_MAX_ITEMS", "256"))
+AGENTE2_API_URL: str = os.getenv("AGENTE2_API_URL", "").strip()
+AGENTE2_API_TOKEN: str = os.getenv("AGENTE2_API_TOKEN", "").strip()
+AGENTE2_API_TIMEOUT_SECONDS: float = float(os.getenv("AGENTE2_API_TIMEOUT_SECONDS", "30"))
 
 
 # ---------------------------------------------------------------------------
@@ -321,8 +325,46 @@ class SpecialistResult:
 class MecSpecialistAgent:
     """Agente especialista em questões de MEC/FASI."""
 
-    def __init__(self, rag: RagSystem) -> None:
+    def __init__(self, rag: RagSystem | None) -> None:
         self.rag = rag
+        self.api_url = AGENTE2_API_URL
+        self.api_token = AGENTE2_API_TOKEN
+        self.api_timeout = AGENTE2_API_TIMEOUT_SECONDS
+
+    def _answer_remote(self, question: str) -> SpecialistResult:
+        headers = {
+            "accept": "application/json",
+            "Content-Type": "application/json",
+        }
+        if self.api_token:
+            headers["x-token"] = self.api_token
+
+        payload = {
+            "message": question,
+            "chat_history": [],
+        }
+
+        with httpx.Client(timeout=self.api_timeout) as client:
+            response = client.post(
+                self.api_url,
+                headers=headers,
+                json=payload,
+            )
+            response.raise_for_status()
+            data = response.json() if response.content else {}
+
+        answer = (
+            data.get("answer")
+            or data.get("response")
+            or data.get("message")
+            or "Não foi possível gerar uma resposta."
+        )
+        raw_confidence = data.get("confidence", 0.8 if answer else 0.0)
+        try:
+            confidence = float(raw_confidence)
+        except (TypeError, ValueError):
+            confidence = 0.8 if answer else 0.0
+        return SpecialistResult(answer=answer, confidence=confidence)
 
     def answer(self, question: str, session_id: str, channel_type: str = "chat") -> SpecialistResult:
         """
@@ -336,6 +378,14 @@ class MecSpecialistAgent:
         Returns:
             SpecialistResult com a resposta e nível de confiança
         """
+        if self.api_url:
+            return self._answer_remote(question)
+
+        if not self.rag:
+            raise RuntimeError(
+                "RagSystem não inicializado e AGENTE2_API_URL não configurado."
+            )
+
         response = self.rag.ask(question, session_id, channel_type)
 
         # Heurística simples de confiança

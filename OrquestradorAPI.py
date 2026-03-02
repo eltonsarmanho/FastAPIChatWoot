@@ -62,6 +62,7 @@ ORCHESTRATOR_CONFIDENCE_THRESHOLD: float = float(os.getenv("ORCHESTRATOR_CONFIDE
 ORCHESTRATOR_USE_LLM_CLASSIFIER: bool = os.getenv(
     "ORCHESTRATOR_USE_LLM_CLASSIFIER", "false"
 ).lower() in {"1", "true", "yes", "on"}
+AGENTE2_API_URL: str = os.getenv("AGENTE2_API_URL", "").strip()
 
 
 # ---------------------------------------------------------------------------
@@ -210,25 +211,32 @@ class MessageOrchestratorAgent:
         self._hf_classifier = OrquestradorHF(threshold=0.5)
         self._classifier_agent: Agent | None = None
         if ORCHESTRATOR_USE_LLM_CLASSIFIER:
-            team_list = ", ".join(self._active_teams) if self._active_teams else "suporte"
-            self._classifier_agent = Agent(
-                model=self.specialist.rag.model,
-                name="Classificador de intenção",
-                search_knowledge=False,
-                telemetry=False,
-                instructions=(
-                    "Você é um classificador de roteamento para atendimento. "
-                    "Classifique a mensagem em uma rota: MEC, HUMAN ou DIRECT. "
-                    "Use HUMAN quando o usuário pedir pessoa/time/suporte (qualquer idioma). "
-                    f"Times disponíveis: {team_list}. "
-                    "Se identificar um time específico na mensagem, responda: HUMAN:<nome_do_time> "
-                    f"usando EXATAMENTE um dos nomes disponíveis ({team_list}). "
-                    "Se não identificar time específico, responda apenas: HUMAN. "
-                    "Use DIRECT para smalltalk/saudações/agradecimentos. "
-                    "Use MEC para dúvidas acadêmicas, regulatórias e de documentos. "
-                    "Exemplos: 'HUMAN:financeiro', 'HUMAN:suporte', 'HUMAN', 'MEC', 'DIRECT'."
-                ),
-            )
+            local_llm_model = self.specialist.rag.model if self.specialist.rag else None
+            if local_llm_model is None:
+                logger.warning(
+                    "ORCHESTRATOR_USE_LLM_CLASSIFIER=true, mas o modo Agente 2 externo está ativo. "
+                    "Classificador LLM será desabilitado e apenas HF/heurísticas serão usadas."
+                )
+            else:
+                team_list = ", ".join(self._active_teams) if self._active_teams else "suporte"
+                self._classifier_agent = Agent(
+                    model=local_llm_model,
+                    name="Classificador de intenção",
+                    search_knowledge=False,
+                    telemetry=False,
+                    instructions=(
+                        "Você é um classificador de roteamento para atendimento. "
+                        "Classifique a mensagem em uma rota: MEC, HUMAN ou DIRECT. "
+                        "Use HUMAN quando o usuário pedir pessoa/time/suporte (qualquer idioma). "
+                        f"Times disponíveis: {team_list}. "
+                        "Se identificar um time específico na mensagem, responda: HUMAN:<nome_do_time> "
+                        f"usando EXATAMENTE um dos nomes disponíveis ({team_list}). "
+                        "Se não identificar time específico, responda apenas: HUMAN. "
+                        "Use DIRECT para smalltalk/saudações/agradecimentos. "
+                        "Use MEC para dúvidas acadêmicas, regulatórias e de documentos. "
+                        "Exemplos: 'HUMAN:financeiro', 'HUMAN:suporte', 'HUMAN', 'MEC', 'DIRECT'."
+                    ),
+                )
 
     def _requested_human(self, text: str) -> bool:
         if any(re.search(pattern, text) for pattern in self._human_patterns):
@@ -618,7 +626,7 @@ class MessageOrchestratorAgent:
 # ---------------------------------------------------------------------------
 # Estado global (inicializado no startup)
 # ---------------------------------------------------------------------------
-rag_system: RagSystem
+rag_system: RagSystem | None = None
 mec_specialist_agent: MecSpecialistAgent
 orchestrator_agent: MessageOrchestratorAgent
 chatwoot_client: ChatwootClient
@@ -633,6 +641,10 @@ _processed_message_ids: dict[int, float] = {}
 async def _load_docs_background() -> None:
     """Carrega documentos em background sem bloquear o servidor."""
     global _docs_loaded, _loading_error
+    if rag_system is None:
+        _docs_loaded = True
+        _loading_error = ""
+        return
     try:
         logger.info("[background] Iniciando carregamento de documentos...")
         await asyncio.to_thread(rag_system.load_documents)
@@ -649,9 +661,17 @@ async def _load_docs_background() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):  # noqa: D401
     """Inicia o sistema RAG e agenda carregamento de documentos em background."""
-    global rag_system, mec_specialist_agent, orchestrator_agent, chatwoot_client
+    global rag_system, mec_specialist_agent, orchestrator_agent, chatwoot_client, _docs_loaded, _loading_error
     logger.info("Iniciando o Agente RAG…")
-    rag_system = RagSystem()
+    if AGENTE2_API_URL:
+        logger.info("Modo Agente 2 externo habilitado: %s", AGENTE2_API_URL)
+        rag_system = None
+        _docs_loaded = True
+        _loading_error = ""
+    else:
+        rag_system = RagSystem()
+        _docs_loaded = False
+        _loading_error = ""
     chatwoot_client = ChatwootClient(
         base_url=CHATWOOT_API_URL,
         api_token=CHATWOOT_API_TOKEN,
@@ -701,11 +721,15 @@ async def lifespan(app: FastAPI):  # noqa: D401
             logger.info("[startup] Prompt do classificador LLM atualizado com times: %s", team_list)
     except Exception as exc:
         logger.warning("[startup] Não foi possível pré-carregar times: %s", exc)
-    # Agenda carregamento em background: servidor fica disponível IMEDIATAMENTE
-    asyncio.create_task(_load_docs_background())
+    # Agenda carregamento em background somente no modo RAG local.
+    if rag_system is not None:
+        asyncio.create_task(_load_docs_background())
     # Pré-aquece o classificador HF (carrega modelo SentenceTransformer em background).
     asyncio.create_task(asyncio.to_thread(orchestrator_agent._hf_classifier.warmup))
-    logger.info("Servidor pronto! Documentos e classificador sendo carregados em background...")
+    if rag_system is None:
+        logger.info("Servidor pronto! Classificador carregando em background (Agente 2 externo).")
+    else:
+        logger.info("Servidor pronto! Documentos e classificador sendo carregados em background...")
     yield
     logger.info("Encerrando o Agente RAG.")
 
@@ -887,6 +911,8 @@ async def health_check():
     return {
         "status": "healthy",
         "service": "Agente RAG Chatwoot",
+        "agent2_mode": "external_api" if AGENTE2_API_URL else "local_rag",
+        "agent2_api_url": AGENTE2_API_URL or None,
         "docs_loaded": _docs_loaded,
         "loading_error": _loading_error or None,
         "docs_folder": DOCS_FOLDER,
@@ -920,6 +946,11 @@ async def reload_documents(recreate: bool = False):
     - `recreate=false` (padrão): insere apenas documentos novos.
     - `recreate=true`: limpa toda a base e recarrega tudo.
     """
+    if rag_system is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Modo Agente 2 externo ativo: recarga de documentos locais está desabilitada.",
+        )
     try:
         await asyncio.to_thread(rag_system.load_documents, recreate)
         return {"status": "success", "message": "Documentos recarregados com sucesso."}
