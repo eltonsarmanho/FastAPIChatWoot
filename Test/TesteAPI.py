@@ -174,7 +174,7 @@ async def run_tests():
     logger.info("=== Inicializando sistema RAG (sem Chatwoot) ===")
 
     # Importações tardias para não carregar antes do logging estar configurado
-    from Agente2 import MecSpecialistAgent, RagSystem
+    from AgenteSabia import MecSpecialistAgent, RagSystem
 
     rag = RagSystem()
 
@@ -231,7 +231,7 @@ async def run_tests():
 # ---------------------------------------------------------------------------
 async def run_interactive():
     """Modo interativo: digita mensagens e vê o roteamento em tempo real."""
-    from Agente2 import MecSpecialistAgent, RagSystem
+    from AgenteSabia import MecSpecialistAgent, RagSystem
     from OrquestradorAPI import MessageOrchestratorAgent
 
     logger.info("=== Modo interativo ===")

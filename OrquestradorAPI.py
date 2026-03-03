@@ -28,7 +28,8 @@ from agno.agent import Agent
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
-from Agente2 import MecSpecialistAgent, RagSystem, looks_like_no_answer
+from AgenteSabia import AgenteSabia, looks_like_no_answer
+from MecSpecialistAgent import MecSpecialistAgent
 from ChatwootClient import ChatwootClient
 from ClassificadorIntencao import OrquestradorHF
 
@@ -626,7 +627,7 @@ class MessageOrchestratorAgent:
 # ---------------------------------------------------------------------------
 # Estado global (inicializado no startup)
 # ---------------------------------------------------------------------------
-rag_system: RagSystem | None = None
+rag_system: AgenteSabia | None = None
 mec_specialist_agent: MecSpecialistAgent
 orchestrator_agent: MessageOrchestratorAgent
 chatwoot_client: ChatwootClient
@@ -669,7 +670,7 @@ async def lifespan(app: FastAPI):  # noqa: D401
         _docs_loaded = True
         _loading_error = ""
     else:
-        rag_system = RagSystem()
+        rag_system = AgenteSabia()
         _docs_loaded = False
         _loading_error = ""
     chatwoot_client = ChatwootClient(
