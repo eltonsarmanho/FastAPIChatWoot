@@ -421,14 +421,19 @@ class MessageOrchestratorAgent:
             for original_name, folded_name in self._active_teams_folded.items():
                 if "financeiro" in folded_name:
                     return original_name
+            # Mesmo sem catálogo local de times, retorna termo canônico
+            # para o resolver buscar match parcial na API do Chatwoot.
+            return "financeiro"
         if re.search(r"\bsuport", normalized):
             for original_name, folded_name in self._active_teams_folded.items():
                 if "suporte" in folded_name:
                     return original_name
+            return "suporte"
         if "support" in normalized or "soporte" in normalized:
             for original_name, folded_name in self._active_teams_folded.items():
                 if "support" in folded_name or "suporte" in folded_name or "soporte" in folded_name:
                     return original_name
+            return "suporte"
 
         if "equipe" in normalized or "time" in normalized or "team" in normalized or "equipo" in normalized:
             support_team = _support_team_name()
@@ -688,9 +693,8 @@ async def lifespan(app: FastAPI):  # noqa: D401
             if isinstance(tid, str) and tid.isdigit():
                 tid = int(tid)
             if name and isinstance(tid, int):
-                from chatwoot_client import _fold_text
                 chatwoot_client._team_cache[name.casefold()] = tid
-                chatwoot_client._team_cache[_fold_text(name)] = tid
+                chatwoot_client._team_cache[fold_text(name)] = tid
         logger.info("[startup] Times carregados: %s", {k: v for k, v in chatwoot_client._team_cache.items()})
 
         # Se TEAM não foi configurado no .env, usa automaticamente os times do Chatwoot.
